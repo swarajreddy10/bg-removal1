@@ -1,322 +1,237 @@
-import { Webhook } from "svix"
-import userModel from "../models/userModel.js"
-import transactionModel from "../models/transactionModel.js"
-import razorpay from 'razorpay';
+import razorpay from "razorpay";
 import stripe from "stripe";
+import { Webhook } from "svix";
+import transactionModel from "../models/transactionModel.js";
+import userModel from "../models/userModel.js";
 
 // Gateway Initialize
-const stripeInstance = new stripe(process.env.STRIPE_SECRET_KEY)
-const razorpayInstance = new razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID,
-    key_secret: process.env.RAZORPAY_KEY_SECRET,
-})
+const stripeInstance = process.env.STRIPE_SECRET_KEY
+    ? new stripe(process.env.STRIPE_SECRET_KEY)
+    : null;
 
-// API Controller Function to Manage Clerk User with database
+const razorpayInstance = process.env.RAZORPAY_KEY_ID
+    ? new razorpay({
+        key_id: process.env.RAZORPAY_KEY_ID,
+        key_secret: process.env.RAZORPAY_KEY_SECRET,
+    })
+    : null;
+
+// API Controller Function to Manage Clerk User with Database
 const clerkWebhooks = async (req, res) => {
-
     try {
+        const whook = new Webhook(process.env.CLERK_WEBHOOK_SECRET);
 
-        // Create a Svix instance with clerk webhook secret.
-        const whook = new Webhook(process.env.CLERK_WEBHOOK_SECRET)
-
-        // Verifying Headers
         await whook.verify(JSON.stringify(req.body), {
             "svix-id": req.headers["svix-id"],
             "svix-timestamp": req.headers["svix-timestamp"],
             "svix-signature": req.headers["svix-signature"],
-        })
+        });
 
-        // Getting Data from request body
-        const { data, type } = req.body
+        const { data, type } = req.body;
 
-        // Switch Cases for differernt Events
         switch (type) {
-            case 'user.created': {
-                const userData = {
+            case "user.created":
+                const newUser = {
                     clerkId: data.id,
                     email: data.email_addresses[0].email_address,
                     firstName: data.first_name,
                     lastName: data.last_name,
                     photo: data.image_url,
-                }
-                await userModel.create(userData)
-                res.json({})
+                };
+                await userModel.create(newUser);
+                res.json({});
                 break;
-            }
 
-            case 'user.updated': {
-                const userData = {
+            case "user.updated":
+                const updatedUser = {
                     email: data.email_addresses[0].email_address,
                     firstName: data.first_name,
                     lastName: data.last_name,
                     photo: data.image_url,
-                }
-                await userModel.findOneAndUpdate({ clerkId: data.id }, userData)
-                res.json({})
+                };
+                await userModel.findOneAndUpdate({ clerkId: data.id }, updatedUser);
+                res.json({});
                 break;
-            }
 
-            case 'user.deleted': {
-                await userModel.findOneAndDelete({ clerkId: data.id })
-                res.json({})
+            case "user.deleted":
+                await userModel.findOneAndDelete({ clerkId: data.id });
+                res.json({});
                 break;
-            }
 
             default:
-                break;
+                res.json({});
         }
-
     } catch (error) {
-        console.log(error.message)
-        res.json({ success: false, message: error.message })
+        console.log(error.message);
+        res.status(500).json({ success: false, message: error.message });
     }
+};
 
-}
-
-// API Controller function to get user available credits data
+// API Controller Function to Get User Available Credits Data
 const userCredits = async (req, res) => {
     try {
-
-        const { clerkId } = req.body
-
-        // Fetching userdata using ClerkId
-        const userData = await userModel.findOne({ clerkId })
-        res.json({ success: true, credits: userData.creditBalance })
-
+        const { clerkId } = req.body;
+        const userData = await userModel.findOne({ clerkId });
+        res.json({ success: true, credits: userData.creditBalance });
     } catch (error) {
-        console.log(error.message)
-        res.json({ success: false, message: error.message })
+        console.log(error.message);
+        res.status(500).json({ success: false, message: error.message });
     }
-}
+};
 
-
-// Payment API to add credits ( RazorPay )
+// Payment API to Add Credits (Razorpay)
 const paymentRazorpay = async (req, res) => {
     try {
+        const { clerkId, planId } = req.body;
+        const userData = await userModel.findOne({ clerkId });
 
-        const { clerkId, planId } = req.body
-
-        const userData = await userModel.findOne({ clerkId })
-
-        // checking for planId and userdata
         if (!userData || !planId) {
-            return res.json({ success: false, message: 'Invalid Credentials' })
+            return res.json({ success: false, message: "Invalid Credentials" });
         }
 
-        let credits, plan, amount, date
+        const plans = {
+            Basic: { credits: 100, amount: 10 },
+            Advanced: { credits: 500, amount: 50 },
+            Business: { credits: 5000, amount: 250 },
+        };
 
-        // Switch Cases for different plans
-        switch (planId) {
-            case 'Basic':
-                plan = 'Basic'
-                credits = 100
-                amount = 10
-                break;
-
-            case 'Advanced':
-                plan = 'Advanced'
-                credits = 500
-                amount = 50
-                break;
-
-            case 'Business':
-                plan = 'Basic'
-                credits = 5000
-                amount = 250
-                break;
-
-            default:
-                return res.json({ success: false, message: 'plan not found' })
+        const plan = plans[planId];
+        if (!plan) {
+            return res.json({ success: false, message: "Plan not found" });
         }
 
-        date = Date.now()
-
-        // Creating Transaction Data
-        const transactionData = {
+        const transactionData = await transactionModel.create({
             clerkId,
-            plan,
-            amount,
-            credits,
-            date
-        }
+            plan: planId,
+            amount: plan.amount,
+            credits: plan.credits,
+            date: Date.now(),
+        });
 
-        // Saving Transaction Data to Database
-        const newTransaction = await transactionModel.create(transactionData)
-
-        // Creating options to create razorpay Order
         const options = {
-            amount: amount * 100,
+            amount: plan.amount * 100,
             currency: process.env.CURRENCY,
-            receipt: newTransaction._id,
-        }
+            receipt: transactionData._id.toString(),
+        };
 
-        // Creating razorpay Order
-        await razorpayInstance.orders.create(options, (error, order) => {
-            if (error) {
-                console.log(error);
-                return res.json({ success: false, message: error });
-            }
-            res.json({ success: true, order });
-        })
-
+        const order = await razorpayInstance.orders.create(options);
+        res.json({ success: true, order });
     } catch (error) {
-        console.log(error)
-        res.json({ success: false, message: error.message })
+        console.log(error);
+        res.status(500).json({ success: false, message: error.message });
     }
-}
+};
 
-// API Controller function to verify razorpay payment
+// API Controller Function to Verify Razorpay Payment
 const verifyRazorpay = async (req, res) => {
     try {
-
         const { razorpay_order_id } = req.body;
-
-        // Fetching order data from razorpay
         const orderInfo = await razorpayInstance.orders.fetch(razorpay_order_id);
 
-        // Checking for payment status
-        if (orderInfo.status === 'paid') {
-            const transactionData = await transactionModel.findById(orderInfo.receipt)
+        if (orderInfo.status === "paid") {
+            const transactionData = await transactionModel.findById(orderInfo.receipt);
+
             if (transactionData.payment) {
-                return res.json({ success: false, message: 'Payment Failed' })
+                return res.json({ success: false, message: "Payment Already Verified" });
             }
 
-            // Adding Credits in user data
-            const userData = await userModel.findOne({ clerkId: transactionData.clerkId })
-            const creditBalance = userData.creditBalance + transactionData.credits
-            await userModel.findByIdAndUpdate(userData._id, { creditBalance })
-
-            // Marking the payment true 
-            await transactionModel.findByIdAndUpdate(transactionData._id, { payment: true })
+            const userData = await userModel.findOne({ clerkId: transactionData.clerkId });
+            const creditBalance = userData.creditBalance + transactionData.credits;
+            await userModel.findByIdAndUpdate(userData._id, { creditBalance });
+            await transactionModel.findByIdAndUpdate(transactionData._id, { payment: true });
 
             res.json({ success: true, message: "Credits Added" });
+        } else {
+            res.json({ success: false, message: "Payment Failed" });
         }
-        else {
-            res.json({ success: false, message: 'Payment Failed' });
-        }
-
     } catch (error) {
         console.log(error);
-        res.json({ success: false, message: error.message });
+        res.status(500).json({ success: false, message: error.message });
     }
-}
+};
 
-// Payment API to add credits ( Stripe )
+// Payment API to Add Credits (Stripe)
 const paymentStripe = async (req, res) => {
     try {
+        const { clerkId, planId } = req.body;
+        const { origin } = req.headers;
 
-        const { clerkId, planId } = req.body
-        const { origin } = req.headers
+        const userData = await userModel.findOne({ clerkId });
 
-        const userData = await userModel.findOne({ clerkId })
-
-        // checking for planId and userdata
         if (!userData || !planId) {
-            return res.json({ success: false, message: 'Invalid Credentials' })
+            return res.json({ success: false, message: "Invalid Credentials" });
         }
 
-        let credits, plan, amount, date
+        const plans = {
+            Basic: { credits: 100, amount: 10 },
+            Advanced: { credits: 500, amount: 50 },
+            Business: { credits: 5000, amount: 250 },
+        };
 
-        // Switch Cases for different plans
-        switch (planId) {
-            case 'Basic':
-                plan = 'Basic'
-                credits = 100
-                amount = 10
-                break;
-
-            case 'Advanced':
-                plan = 'Advanced'
-                credits = 500
-                amount = 50
-                break;
-
-            case 'Business':
-                plan = 'Basic'
-                credits = 5000
-                amount = 250
-                break;
-
-            default:
-                return res.json({ success: false, message: 'plan not found' })
+        const plan = plans[planId];
+        if (!plan) {
+            return res.json({ success: false, message: "Plan not found" });
         }
 
-        date = Date.now()
-
-        // Creating Transaction Data
-        const transactionData = {
+        const transactionData = await transactionModel.create({
             clerkId,
-            plan,
-            amount,
-            credits,
-            date
-        }
+            plan: planId,
+            amount: plan.amount,
+            credits: plan.credits,
+            date: Date.now(),
+        });
 
-        // Saving Transaction Data to Database
-        const newTransaction = await transactionModel.create(transactionData)
-
-        const currency = process.env.CURRENCY.toLocaleLowerCase()
-
-        // Creating line items to for Stripe
-        const line_items = [{
-            price_data: {
-                currency,
-                product_data: {
-                    name: "Credit Purchase"
+        const line_items = [
+            {
+                price_data: {
+                    currency: process.env.CURRENCY.toLowerCase(),
+                    product_data: { name: "Credit Purchase" },
+                    unit_amount: plan.amount * 100,
                 },
-                unit_amount: transactionData.amount * 100
+                quantity: 1,
             },
-            quantity: 1
-        }]
+        ];
 
         const session = await stripeInstance.checkout.sessions.create({
-            success_url: `${origin}/verify?success=true&transactionId=${newTransaction._id}`,
-            cancel_url: `${origin}/verify?success=false&transactionId=${newTransaction._id}`,
-            line_items: line_items,
-            mode: 'payment',
-        })
-        
+            success_url: `${origin}/verify?success=true&transactionId=${transactionData._id}`,
+            cancel_url: `${origin}/verify?success=false&transactionId=${transactionData._id}`,
+            line_items,
+            mode: "payment",
+        });
+
         res.json({ success: true, session_url: session.url });
-
-    } catch (error) {
-        console.log(error)
-        res.json({ success: false, message: error.message })
-    }
-}
-
-// API Controller function to verify stripe payment
-const verifyStripe = async (req, res) => {
-    try {
-
-        const { transactionId, success } = req.body
-
-        // Checking for payment status
-        if (success === 'true') {
-            const transactionData = await transactionModel.findById(transactionId)
-            if (transactionData.payment) {
-                return res.json({ success: false, message: 'Payment Already Verified' })
-            }
-
-            // Adding Credits in user data
-            const userData = await userModel.findOne({ clerkId: transactionData.clerkId })
-            const creditBalance = userData.creditBalance + transactionData.credits
-            await userModel.findByIdAndUpdate(userData._id, { creditBalance })
-
-            // Marking the payment true 
-            await transactionModel.findByIdAndUpdate(transactionData._id, { payment: true })
-
-            res.json({ success: true, message: "Credits Added" });
-        }
-        else {
-            res.json({ success: false, message: 'Payment Failed' });
-        }
-
     } catch (error) {
         console.log(error);
-        res.json({ success: false, message: error.message });
+        res.status(500).json({ success: false, message: error.message });
     }
-}
+};
 
+// API Controller Function to Verify Stripe Payment
+const verifyStripe = async (req, res) => {
+    try {
+        const { transactionId, success } = req.body;
 
+        if (success === "true") {
+            const transactionData = await transactionModel.findById(transactionId);
 
-export { clerkWebhooks, userCredits, paymentRazorpay, verifyRazorpay, paymentStripe, verifyStripe }
+            if (transactionData.payment) {
+                return res.json({ success: false, message: "Payment Already Verified" });
+            }
+
+            const userData = await userModel.findOne({ clerkId: transactionData.clerkId });
+            const creditBalance = userData.creditBalance + transactionData.credits;
+            await userModel.findByIdAndUpdate(userData._id, { creditBalance });
+            await transactionModel.findByIdAndUpdate(transactionData._id, { payment: true });
+
+            res.json({ success: true, message: "Credits Added" });
+        } else {
+            res.json({ success: false, message: "Payment Failed" });
+        }
+    } catch (error) {
+        console.log(error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+export { clerkWebhooks, paymentRazorpay, paymentStripe, userCredits, verifyRazorpay, verifyStripe };
+
